@@ -1,0 +1,246 @@
+{
+  "name": "DIO | Assistente de Investimentos - RPA + n8n (Desafio com IA)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "clientes",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-clientes",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        0
+      ],
+      "webhookId": "dio-lab-clientes"
+    },
+    {
+      "parameters": {
+        "url": "https://digitalinnovationone.github.io/dio-lab-assistente-investimentos-rpa-n8n/data.csv",
+        "options": {}
+      },
+      "id": "http-data-csv",
+      "name": "HTTP Request",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ── Parse do CSV de investimentos ───────────────────────────────────────────\n// O HTTP Request devolve o data.csv como texto puro. Aqui ele vira um array\n// de objetos { perfil, produto, minimo, rentabilidade }.\n\nconst bruto = $json.data ?? $json.body ?? $json;\nconst texto = typeof bruto === 'string' ? bruto : JSON.stringify(bruto);\n\nconst linhas = texto.split(/\\r?\\n/).map((l) => l.trim()).filter(Boolean);\nconst cabecalho = linhas[0].split(',').map((h) => h.trim());\n\nconst investimentos = linhas.slice(1).map((linha) => {\n  const colunas = linha.split(',').map((c) => c.trim());\n  const obj = {};\n  cabecalho.forEach((h, i) => {\n    obj[h] = colunas[i] ?? '';\n  });\n  // \"minimo\" vem como texto no CSV; normalizamos para número\n  obj.minimo = Number(String(obj.minimo).replace(/[^\\d]/g, '')) || 0;\n  return obj;\n});\n\nreturn [{ json: { investimentos } }];\n"
+      },
+      "id": "parse-csv-investimentos",
+      "name": "Parse CSV Investimentos",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "id": "merge-clientes-investimentos",
+      "name": "Merge",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ── Monta um prompt por cliente para o Agente de IA (Etapa 5) ───────────────\nconst entrada = $input.first().json;\nconst clientes = entrada.body?.clientes ?? entrada.clientes ?? [];\nconst investimentos = entrada.investimentos ?? [];\n\nconst paraNumero = (texto) => {\n  if (typeof texto === 'number') return texto;\n  const limpo = String(texto).replace(/[^\\d,]/g, '').replace(',', '.');\n  return Number(limpo) || 0;\n};\n\nreturn clientes.map((cliente) => {\n  const saldo = paraNumero(cliente.saldo);\n  const opcoes = investimentos.filter((i) => i.perfil === cliente.perfil);\n\n  const catalogo = opcoes\n    .map((i) => `- ${i.produto} | mínimo R$ ${i.minimo} | rentabilidade ${i.rentabilidade}`)\n    .join('\\n');\n\n  const prompt = [\n    'Você é um assistente de investimentos de um banco brasileiro.',\n    'Escreva UMA mensagem curta (máx. 3 frases), em português do Brasil, tom cordial e profissional.',\n    'Não invente produtos: use apenas os do catálogo abaixo.',\n    'Não prometa retorno garantido e não use linguagem de venda agressiva.',\n    '',\n    `Cliente: ${cliente.nome}`,\n    `Perfil: ${cliente.perfil}`,\n    `Saldo disponível: ${cliente.saldo}`,\n    '',\n    'Catálogo disponível para esse perfil:',\n    catalogo,\n  ].join('\\n');\n\n  return { json: { ...cliente, saldo_numerico: saldo, prompt } };\n});\n"
+      },
+      "id": "montar-prompt-por-cliente",
+      "name": "Montar Prompt por Cliente",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.prompt }}",
+        "messages": {
+          "messageValues": []
+        }
+      },
+      "id": "llm-chain",
+      "name": "Gerar Mensagem com IA",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-2.0-flash",
+        "options": {
+          "temperature": 0.7
+        }
+      },
+      "id": "gemini-model",
+      "name": "Google Gemini Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        880,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ── Consolida a saída do LLM no mesmo formato do MVP ────────────────────────\nconst itens = $input.all();\n\nconst recomendacoes = itens.map((item) => {\n  const j = item.json;\n  const texto = j.text ?? j.output ?? j.response ?? j.mensagem ?? '';\n  return {\n    nome: j.nome,\n    email: j.email,\n    saldo: j.saldo,\n    perfil: j.perfil,\n    mensagem: String(texto).trim(),\n  };\n});\n\nreturn [\n  {\n    json: {\n      ok: true,\n      gerado_em: new Date().toISOString(),\n      origem: 'LLM (Google Gemini)',\n      total_clientes: recomendacoes.length,\n      recomendacoes,\n    },\n  },\n];\n"
+      },
+      "id": "consolidar-respostas",
+      "name": "Consolidar Respostas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1340,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Parse CSV Investimentos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse CSV Investimentos": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Montar Prompt por Cliente",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar Prompt por Cliente": {
+      "main": [
+        [
+          {
+            "node": "Gerar Mensagem com IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Gerar Mensagem com IA",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gerar Mensagem com IA": {
+      "main": [
+        [
+          {
+            "node": "Consolidar Respostas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consolidar Respostas": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "dio-lab-assistente-investimentos-rpa-n8n"
+  },
+  "tags": []
+}
