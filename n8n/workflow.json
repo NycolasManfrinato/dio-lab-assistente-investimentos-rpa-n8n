@@ -1,0 +1,166 @@
+{
+  "name": "DIO | Assistente de Investimentos - RPA + n8n (MVP)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "clientes",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-clientes",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        0
+      ],
+      "webhookId": "dio-lab-clientes"
+    },
+    {
+      "parameters": {
+        "url": "https://digitalinnovationone.github.io/dio-lab-assistente-investimentos-rpa-n8n/data.csv",
+        "options": {}
+      },
+      "id": "http-data-csv",
+      "name": "HTTP Request",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ── Parse do CSV de investimentos ───────────────────────────────────────────\n// O HTTP Request devolve o data.csv como texto puro. Aqui ele vira um array\n// de objetos { perfil, produto, minimo, rentabilidade }.\n\nconst bruto = $json.data ?? $json.body ?? $json;\nconst texto = typeof bruto === 'string' ? bruto : JSON.stringify(bruto);\n\nconst linhas = texto.split(/\\r?\\n/).map((l) => l.trim()).filter(Boolean);\nconst cabecalho = linhas[0].split(',').map((h) => h.trim());\n\nconst investimentos = linhas.slice(1).map((linha) => {\n  const colunas = linha.split(',').map((c) => c.trim());\n  const obj = {};\n  cabecalho.forEach((h, i) => {\n    obj[h] = colunas[i] ?? '';\n  });\n  // \"minimo\" vem como texto no CSV; normalizamos para número\n  obj.minimo = Number(String(obj.minimo).replace(/[^\\d]/g, '')) || 0;\n  return obj;\n});\n\nreturn [{ json: { investimentos } }];\n"
+      },
+      "id": "parse-csv-investimentos",
+      "name": "Parse CSV Investimentos",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "id": "merge-clientes-investimentos",
+      "name": "Merge",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ── Cruzamento perfil x investimento + mensagem estática (MVP) ──────────────\n// Entrada: item combinado pelo Merge -> clientes (webhook) + investimentos (CSV)\n\nconst entrada = $input.first().json;\nconst clientes = entrada.body?.clientes ?? entrada.clientes ?? [];\nconst investimentos = entrada.investimentos ?? [];\n\n// Etapa 4 do desafio: templates fixos por perfil de investidor\nconst TEMPLATES = {\n  Conservador:\n    'Olá, {nome}! Pelo seu perfil Conservador, a prioridade é segurança e previsibilidade. ' +\n    'Com o saldo de {saldo}, uma boa porta de entrada é {produto} (aplicação mínima de {minimo}, rentabilidade {rentabilidade}).',\n  Moderado:\n    'Olá, {nome}! Seu perfil Moderado pede um mix equilibrado entre renda fixa e variável. ' +\n    'Com o saldo de {saldo}, vale considerar {produto} (aplicação mínima de {minimo}, rentabilidade {rentabilidade}).',\n  Arrojado:\n    'Olá, {nome}! Como investidor Arrojado, você aceita mais volatilidade em troca de retorno. ' +\n    'Com o saldo de {saldo}, {produto} faz sentido (aplicação mínima de {minimo}, rentabilidade {rentabilidade}).',\n};\n\nconst brl = (v) =>\n  Number(v).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });\n\n// \"R$ 12.500,00\" -> 12500\nconst paraNumero = (texto) => {\n  if (typeof texto === 'number') return texto;\n  const limpo = String(texto).replace(/[^\\d,]/g, '').replace(',', '.');\n  return Number(limpo) || 0;\n};\n\nconst recomendacoes = clientes.map((cliente) => {\n  const saldo = paraNumero(cliente.saldo);\n  const doPerfil = investimentos.filter((i) => i.perfil === cliente.perfil);\n\n  // Preferimos o produto mais \"alto\" que o saldo do cliente já alcança.\n  const elegiveis = doPerfil.filter((i) => saldo >= i.minimo);\n  const escolhido =\n    (elegiveis.length ? elegiveis : doPerfil).sort((a, b) => b.minimo - a.minimo)[0] ?? null;\n\n  if (!escolhido) {\n    return {\n      ...cliente,\n      saldo_numerico: saldo,\n      produto: null,\n      mensagem: `Olá, ${cliente.nome}! Ainda não temos uma opção cadastrada para o perfil ${cliente.perfil}.`,\n      alerta: 'nenhum produto encontrado para o perfil',\n    };\n  }\n\n  const mensagem = (TEMPLATES[cliente.perfil] ?? TEMPLATES.Moderado)\n    .replace('{nome}', cliente.nome)\n    .replace('{saldo}', brl(saldo))\n    .replace('{produto}', escolhido.produto)\n    .replace('{minimo}', brl(escolhido.minimo))\n    .replace('{rentabilidade}', escolhido.rentabilidade);\n\n  return {\n    ...cliente,\n    saldo_numerico: saldo,\n    produto: escolhido.produto,\n    minimo: escolhido.minimo,\n    rentabilidade: escolhido.rentabilidade,\n    atende_minimo: saldo >= escolhido.minimo,\n    mensagem,\n  };\n});\n\nreturn [\n  {\n    json: {\n      ok: true,\n      gerado_em: new Date().toISOString(),\n      origem: 'templates estaticos (MVP)',\n      total_clientes: clientes.length,\n      total_investimentos: investimentos.length,\n      recomendacoes,\n    },\n  },\n];\n"
+      },
+      "id": "gerar-mensagens",
+      "name": "Gerar Mensagens",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        880,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Parse CSV Investimentos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse CSV Investimentos": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Gerar Mensagens",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gerar Mensagens": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "dio-lab-assistente-investimentos-rpa-n8n"
+  },
+  "tags": []
+}
